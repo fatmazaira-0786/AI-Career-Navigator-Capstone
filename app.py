@@ -1,156 +1,254 @@
 import streamlit as st
 import os
 import json
+import time
 from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
-from typing import List
+from google.genai.errors import APIError
+from io import StringIO
 
-# --- Configuration and Initialization ---
-# Ensure API Key is loaded from environment secrets (required for deployment)
-API_KEY = os.getenv('GEMINI_API_KEY')
+# --- 1. CONFIGURATION AND INITIAL SETUP ---
+st.set_page_config(layout="wide", page_title="AI-Powered Career Navigator")
+
+# Check for API Key in Streamlit Secrets
+try:
+    # Use st.secrets for Streamlit Cloud deployment
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except (KeyError, AttributeError):
+    # Fallback for local development or if key is in environment variables
+    API_KEY = os.environ.get("GEMINI_API_KEY")
+
 if not API_KEY:
-    st.error("Error: GEMINI_API_KEY environment variable not set. Please set the API key for deployment.")
+    st.error("GEMINI_API_KEY not found. Please set it in Streamlit Secrets or environment variables.")
     st.stop()
+
+# Initialize the Gemini Client
+try:
+    client = genai.Client(api_key=API_KEY)
+except Exception as e:
+    st.error(f"Error initializing Gemini client: {e}")
+    st.stop()
+
+# Define the Google Search tool structure for grounding
+google_search_tool = {"google_search": {}}
+
+# --- 2. ROBUST API CALL FUNCTION (THE FIX) ---
+@st.cache_data(show_spinner=False)
+def safe_generate_content(client, model_name, contents, system_instruction, max_retries=5, tools=None):
+    """
+    Handles API calls with automatic retries on server errors (503, 504)
+    to ensure the Streamlit app doesn't crash on temporary network issues.
+    """
+    st.info(f"Agent running: {system_instruction.split(' ')[2]}... Retries are enabled for stability.")
     
-client = genai.Client(api_key=API_KEY)
+    # Structure the API payload correctly
+    payload = {
+        "model": model_name,
+        "contents": [{"parts": [{"text": contents}]}],
+        "config": {
+            "system_instruction": system_instruction,
+            "tools": tools if tools else [],
+        }
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=payload["model"],
+                contents=payload["contents"],
+                config=payload["config"]
+            )
+            # If successful, return the response
+            return response
+        
+        except APIError as e:
+            # Catch API errors (503, 504) and automatically retry
+            st.warning(f"Attempt {attempt + 1} failed (Server Busy/Timeout). Retrying in 5 seconds...")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                st.error("All retries failed. Please try again later.")
+                raise # Re-raise the error if all attempts fail
+        
+        except Exception as e:
+            st.error(f"An unexpected error occurred during API call: {e}")
+            raise
 
-# --- 1. SCHEMAS (From Code Cells 1 & 4) ---
+    return None
 
-class MarketResearchOutput(BaseModel):
-    target_role: str = Field(description="The final job title.")
-    core_required_skills: List[str] = Field(description="A list of 5-8 most critical hard skills.")
-    in_demand_tools: List[str] = Field(description="A list of 3-5 specific tools or frameworks.")
-    salary_range_usd: str = Field(description="The current average entry-level salary range.")
-    top_3_career_gaps: List[str] = Field(description="The three biggest knowledge/experience gaps.")
+# --- 3. AGENT FUNCTIONS (THE PIPELINE) ---
 
-class ResumeAnalysisOutput(BaseModel):
-    candidate_name: str = Field(description="The full name of the candidate.")
-    current_role: str = Field(description="The candidate's most recent or current job title.")
-    total_experience_years: float = Field(description="The total estimated professional experience in years.")
-    extracted_skills: List[str] = Field(description="A comprehensive list of all hard technical and soft skills.")
-
-# --- 2. PYTHON LOGIC (From Code Cell 7) ---
-
-def calculate_skill_gap(required_skills: List[str], existing_skills: List[str]) -> List[str]:
-    required_set = {skill.strip().lower() for skill in required_skills}
-    existing_set = {skill.strip().lower() for skill in existing_skills}
-    gap_set = required_set - existing_set
-    missing_skills = [s.title() for s in gap_set]
-    return missing_skills
-
-# --- 3. AGENT FUNCTIONS (From Code Cells 2 & 5) ---
-
-@st.cache_data
-def market_researcher_agent(starting_role: str, target_role: str) -> dict:
-    # STEP 1: Search Agent (Tool Use for RAG)
-    search_prompt = f"""
-    Use the Google Search Tool to find the most current and in-demand skills, tools, salary range, and career gaps 
-    for the transition from '{starting_role}' to '{target_role}'. Synthesize the search results into a detailed, 
-    structured paragraph of text covering all necessary fields. DO NOT output JSON.
-    """
-    search_config = types.GenerateContentConfig(tools=[{"google_search": {}}])
-    search_response = client.models.generate_content(
-        model='gemini-2.5-pro', contents=[search_prompt], config=search_config
+# --- AGENT 1: Resume Analyzer ---
+def analyze_resume(uploaded_file, client):
+    """Extracts skills, roles, and target career from a resume."""
+    st.info("Agent 1 (Resume Analyzer) is processing your resume...")
+    
+    # 1. Read the file content
+    string_data = StringIO(uploaded_file.getvalue().decode("utf-8")).read()
+    
+    system_instruction = (
+        "You are a professional Resume Analyst. Your task is to extract key information "
+        "from the provided resume text. Respond ONLY with a clean JSON object containing "
+        "the following keys: 'current_skills' (array of strings), 'current_roles' (array of strings), "
+        "'target_career' (single string, the most likely next career path based on the resume)."
     )
-    raw_search_context = search_response.text
-
-    # STEP 2: Structuring Agent (JSON Constraint)
-    structuring_prompt = f"""
-    Extract the required fields from the market research context provided below and format it perfectly into the required JSON schema.
-    Market Research Context: --- {raw_search_context} ---
-    """
-    structuring_config = types.GenerateContentConfig(
-        response_mime_type="application/json", response_schema=MarketResearchOutput
+    
+    prompt = f"Analyze the following resume text and return the required JSON:\n\n---\n{string_data}"
+    
+    response = safe_generate_content(
+        client,
+        model_name="gemini-2.5-flash",
+        contents=prompt,
+        system_instruction=system_instruction,
+        tools=None
     )
-    structure_response = client.models.generate_content(
-        model='gemini-2.5-flash', contents=[structuring_prompt], config=structuring_config
-    )
-    return json.loads(structure_response.text)
+    
+    try:
+        # Assuming the model returns a parsable JSON string
+        json_string = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(json_string)
+    except Exception:
+        st.error("Could not parse JSON output from Resume Analyzer. Using fallback data.")
+        return {
+            "current_skills": ["Python", "SQL", "Data Analysis"],
+            "current_roles": ["Data Analyst", "Intern"],
+            "target_career": "Senior Data Scientist"
+        }
 
-@st.cache_data
-def resume_analyzer_agent(resume_text: str) -> dict:
+# --- AGENT 2: Market Researcher ---
+def research_gaps(analysis_data, client):
+    """Uses Google Search to find required skills and salary expectations."""
+    st.info("Agent 2 (Market Researcher) is finding real-time job requirements...")
+    
+    target = analysis_data["target_career"]
+    
+    system_instruction = (
+        f"You are a Career Market Researcher. Use Google Search to find the TOP 5 most "
+        f"in-demand skills and the typical salary range (e.g., $120k - $180k) for a "
+        f"'{target}' in the current market. Respond ONLY with a clean JSON object "
+        f"with keys: 'required_skills' (array of strings) and 'salary_range' (string)."
+    )
+    
+    prompt = f"Find the current market requirements for a {target}."
+    
+    response = safe_generate_content(
+        client,
+        model_name="gemini-2.5-pro", # Using Pro for better tool use and synthesis
+        contents=prompt,
+        system_instruction=system_instruction,
+        tools=[google_search_tool]
+    )
+    
+    try:
+        # Check if the response contains function calls (if not implemented, assume direct text)
+        if response and hasattr(response, 'function_calls') and response.function_calls:
+            # Logic to handle function calls and tool output goes here
+            # For simplicity, we assume the model directly returns the JSON after reasoning
+            pass
+
+        json_string = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(json_string)
+    except Exception:
+        st.error("Could not parse JSON output from Market Researcher. Using fallback data.")
+        return {
+            "required_skills": ["Advanced LLMs", "Cloud Deployment (GCP)", "Prompt Engineering", "Vector Databases", "CI/CD"],
+            "salary_range": "$140,000 - $200,000"
+        }
+
+# --- AGENT 3: Curriculum Designer ---
+def design_curriculum(analysis_data, research_data, client):
+    """Creates the final 6-month roadmap."""
+    st.info("Agent 3 (Curriculum Designer) is synthesizing the final 6-Month Roadmap...")
+    
+    # 1. Prepare combined input data
+    current_skills = ", ".join(analysis_data["current_skills"])
+    required_skills = ", ".join(research_data["required_skills"])
+    target = analysis_data["target_career"]
+    
+    # 2. Identify Skill Gaps
+    gap_skills = [
+        skill for skill in research_data["required_skills"] 
+        if skill not in analysis_data["current_skills"]
+    ]
+    
+    system_instruction = (
+        "You are a world-class Curriculum Designer and Career Coach. "
+        "Your task is to create a prescriptive, 6-Month Career Roadmap. "
+        "The output MUST be a single, well-formatted Markdown document, not a JSON. "
+        "Include sections for Summary, Skill Gaps, and the 6-Month Plan (Month 1 to Month 6)."
+    )
+    
     prompt = f"""
-    You are an expert resume parsing agent. Accurately extract key information from the provided raw resume text and normalize the skills into a common list. 
-    The raw resume text is provided below: --- {resume_text} ---
+    --- USER PROFILE ---
+    Target Career: {target} (Salary: {research_data["salary_range"]})
+    Current Skills: {current_skills}
+    Required Market Skills: {required_skills}
+    Identified Skill Gaps: {', '.join(gap_skills) if gap_skills else 'None'}
+    
+    --- TASK ---
+    Generate a 6-month curriculum (Roadmap) focused on closing the identified skill gaps. 
+    Each month should have 3-4 specific, actionable learning items.
     """
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json", response_schema=ResumeAnalysisOutput
-    )
-    response = client.models.generate_content(
-        model='gemini-2.5-flash', contents=[prompt], config=config
-    )
-    return json.loads(response.text)
-
-@st.cache_data
-def curriculum_designer_agent(candidate_data: dict, market_data: dict, skill_gap: List[str]) -> str:
-    context_prompt = f"""
-    You are the Curriculum Designer Agent. Your goal is to synthesize the following data into a comprehensive, 6-month, week-by-week learning plan designed to close the 'Skill Gap'. 
-    [Context removed for brevity - includes Candidate Data, Market Data, and Skill Gap lists].
-    Create a detailed 6-Month Career Transition Roadmap. 
-    1. Structure the plan by **Months and Weeks**.
-    2. Dedicate the first 4 months to learning the **Missing Skills** and **In-Demand Tools**.
-    3. Dedicate the last 2 months to **Capstone Projects** and **Interview Prep**.
-    4. Format the entire output as a single, beautiful **Markdown** response.
-    """
-    # Note: Using st.cache_data requires that the prompt generation be clean.
-    # The full, detailed prompt from Code Cell 8 should be pasted here in the real app.
     
-    response = client.models.generate_content(
-        model='gemini-2.5-pro', contents=[context_prompt]
+    response = safe_generate_content(
+        client,
+        model_name="gemini-2.5-pro", # Use Pro for high-quality, long-form output
+        contents=prompt,
+        system_instruction=system_instruction,
+        tools=None
     )
-    return response.text
-
-# --- 4. STREAMLIT FRONTEND (Orchestration) ---
-
-st.set_page_config(page_title="Personalized Career Navigator Agent", layout="wide")
-st.title("🗺️ AI-Powered Career Navigator")
-st.markdown("---")
-
-# Input Columns
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    current_role = st.text_input("1. Your Current Role (e.g., Data Analyst)", "Data Analyst")
-    target_role = st.text_input("2. Your Target Role (e.g., AI Engineer)", "AI Engineer")
-
-with col2:
-    resume_text = st.text_area(
-        "3. Paste Your Resume/Experience Summary Here (Required)", 
-        "5 years experience. Proficient in Python, SQL, Tableau, and team management. Led a small data team.",
-        height=150
-    )
-
-st.markdown("---")
-
-if st.button("🚀 Generate Personalized Career Roadmap", type="primary") and resume_text:
     
-    with st.spinner("🧠 Analyzing Resume and Researching Market Trends..."):
-        
-        # 1. RUN AGENT 2 (Resume Analyzer)
-        candidate_output = resume_analyzer_agent(resume_text)
+    return response.text if response else "Error: Could not generate roadmap."
 
-        # 2. RUN AGENT 1 (Market Researcher)
-        market_output = market_researcher_agent(current_role, target_role)
+# --- 4. STREAMLIT UI AND EXECUTION FLOW ---
 
-        # 3. PYTHON LOGIC (Skill Gap Calculation)
-        required_skills_list = market_output.get('core_required_skills', [])
-        existing_skills_list = candidate_output.get('extracted_skills', [])
-        skill_gap_list = calculate_skill_gap(required_skills_list, existing_skills_list)
+st.title("AI-Powered Career Navigator")
+st.markdown("A Multi-Agent Gemini System for generating personalized 6-Month Career Roadmaps.")
 
-    st.success("Analysis Complete! Generating Final Roadmap...")
-    
-    # Display the structured data used for the plan
-    st.subheader("📊 Skill Gap Analysis Snapshot")
-    st.markdown(f"**Target Role:** {market_output.get('target_role')}")
-    st.markdown(f"**Existing Skills:** {', '.join(existing_skills_list[:5])}...")
-    st.markdown(f"**🛑 Critical Missing Skills:** {', '.join(skill_gap_list)}")
-    st.markdown("---")
+# Initialize session state for the roadmap results
+if 'roadmap_result' not in st.session_state:
+    st.session_state.roadmap_result = None
 
-    with st.spinner("✨ Designing Curriculum..."):
-        # 4. RUN AGENT 3 (Curriculum Designer)
-        final_roadmap = curriculum_designer_agent(candidate_output, market_output, skill_gap_list)
-        
-    st.header("✅ Your Personalized 6-Month Career Roadmap")
-    st.markdown(final_roadmap)
-    st.balloons()
+# Input: Resume Upload
+uploaded_file = st.file_uploader(
+    "Upload Your Resume (PDF or TXT) to Begin:", 
+    type=["txt", "pdf"],
+    accept_multiple_files=False
+)
+
+if uploaded_file:
+    # Use the filename as a run identifier
+    run_id = uploaded_file.name + str(uploaded_file.size)
+
+    # Check if a previous run is already in cache
+    if st.session_state.roadmap_result and st.session_state.roadmap_result.get('run_id') == run_id:
+        st.success("Roadmap loaded from cache!")
+        st.subheader("Your Personalized 6-Month Career Roadmap")
+        st.markdown(st.session_state.roadmap_result['content'])
+    else:
+        # Start the pipeline when button is clicked
+        if st.button("Generate My Roadmap (Takes ~30-60 seconds)", type="primary"):
+            st.session_state.roadmap_result = None # Clear previous result
+            with st.spinner("🚀 Running Multi-Agent Pipeline..."):
+                try:
+                    # AGENT 1
+                    analysis_output = analyze_resume(uploaded_file, client)
+                    
+                    # AGENT 2
+                    research_output = research_gaps(analysis_output, client)
+                    
+                    # AGENT 3
+                    roadmap_markdown = design_curriculum(analysis_output, research_output, client)
+                    
+                    # Store result in session state
+                    st.session_state.roadmap_result = {
+                        'run_id': run_id,
+                        'content': roadmap_markdown
+                    }
+                    
+                    st.success("Roadmap Generation Complete!")
+                    st.subheader("Your Personalized 6-Month Career Roadmap")
+                    st.markdown(roadmap_markdown)
+                
+                except Exception as e:
+                    st.error(f"A critical error stopped the pipeline: {e}")
+                    st.session_state.roadmap_result = None
