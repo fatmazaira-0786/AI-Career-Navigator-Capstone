@@ -3,8 +3,6 @@ import os
 import json
 import time
 from google import genai
-from google.genai.errors import APIError
-from io import StringIO
 # Import the custom error class safely
 try:
     from google.genai.errors import APIError
@@ -34,7 +32,7 @@ except Exception as e:
 # Define the Google Search tool structure for grounding
 google_search_tool = {"google_search": {}}
 
-# --- 2. ROBUST API CALL FUNCTION (THE FIX) ---
+# --- 2. ROBUST API CALL FUNCTION (STABILITY) ---
 @st.cache_data(show_spinner=False)
 def safe_generate_content(client, model_name, contents, system_instruction, max_retries=7, tools=None):
     """
@@ -60,7 +58,6 @@ def safe_generate_content(client, model_name, contents, system_instruction, max_
                 contents=payload["contents"],
                 config=payload["config"]
             )
-            # If successful, return the response
             return response
         
         except APIError as e:
@@ -77,16 +74,13 @@ def safe_generate_content(client, model_name, contents, system_instruction, max_
 
     return None
 
-# --- 3. AGENT FUNCTIONS (THE PIPELINE) ---
+# --- 3. AGENT FUNCTIONS (PIPELINE) ---
 
 # --- AGENT 1: Resume Analyzer ---
-# This function is fine as the input file is unique
-def analyze_resume(uploaded_file, client):
-    """Extracts skills, roles, and target career from a resume."""
-    st.info("Agent 1 (Resume Analyzer) is processing your resume...")
-    
-    # 1. Read the file content
-    string_data = StringIO(uploaded_file.getvalue().decode("utf-8")).read()
+# Now takes resume_text (the string from the text area)
+def analyze_resume(resume_text, client):
+    """Extracts skills, roles, and target career from resume text."""
+    st.info("Agent 1 (Resume Analyzer) is processing your resume summary...")
     
     system_instruction = (
         "You are a professional Resume Analyst. Your task is to extract key information "
@@ -95,7 +89,7 @@ def analyze_resume(uploaded_file, client):
         "'target_career' (single string, the most likely next career path based on the resume)."
     )
     
-    prompt = f"Analyze the following resume text and return the required JSON:\n\n---\n{string_data}"
+    prompt = f"Analyze the following resume text and return the required JSON:\n\n---\n{resume_text}"
     
     response = safe_generate_content(
         client,
@@ -117,13 +111,12 @@ def analyze_resume(uploaded_file, client):
         }
 
 # --- AGENT 2: Market Researcher ---
-# *** CRITICAL CHANGE HERE: Added current_role and target_role as arguments ***
-@st.cache_data(show_spinner=False) # MUST KEEP CACHE
+@st.cache_data(show_spinner=False)
 def research_gaps(analysis_data, client, current_role, target_role):
-    """Uses Google Search to find required skills and salary expectations, and cache based on role inputs."""
+    """Uses Google Search to find required skills and salary expectations, cache based on role inputs."""
     st.info("Agent 2 (Market Researcher) is finding real-time job requirements...")
     
-    target = target_role # Use the explicit target_role from the text box
+    target = target_role 
     
     system_instruction = (
         f"You are a Career Market Researcher. Use Google Search to find the TOP 5 most "
@@ -134,10 +127,9 @@ def research_gaps(analysis_data, client, current_role, target_role):
     
     prompt = f"Find the current market requirements for a {target}."
     
-    # NOTE: Model downgraded to flash for better stability as per previous step
     response = safe_generate_content(
         client,
-        model_name="gemini-2.5-flash",
+        model_name="gemini-2.5-flash", # Faster model for tool use stability
         contents=prompt,
         system_instruction=system_instruction,
         tools=[google_search_tool]
@@ -154,16 +146,15 @@ def research_gaps(analysis_data, client, current_role, target_role):
         }
 
 # --- AGENT 3: Curriculum Designer ---
-# *** CRITICAL CHANGE HERE: Added current_role and target_role as arguments ***
-@st.cache_data(show_spinner=False) # MUST KEEP CACHE
+@st.cache_data(show_spinner=False)
 def design_curriculum(analysis_data, research_data, client, current_role, target_role):
-    """Creates the final 6-month roadmap, and cache based on role inputs."""
+    """Creates the final 6-month roadmap, cache based on role inputs."""
     st.info("Agent 3 (Curriculum Designer) is synthesizing the final 6-Month Roadmap...")
     
     # 1. Prepare combined input data
     current_skills = ", ".join(analysis_data["current_skills"])
     required_skills = ", ".join(research_data["required_skills"])
-    target = target_role # Use the explicit target_role from the text box
+    target = target_role
     
     # 2. Identify Skill Gaps
     gap_skills = [
@@ -206,65 +197,83 @@ def design_curriculum(analysis_data, research_data, client, current_role, target
 st.title("AI-Powered Career Navigator")
 st.markdown("A Multi-Agent Gemini System for generating personalized 6-Month Career Roadmaps.")
 
-# --- UI INPUTS ---
-current_role_input = st.text_input("Your Current Role (e.g., Data Analyst)", "Data Analyst")
-target_role_input = st.text_input("Your Target Role (e.g., AI Engineer)", "AI Engineer")
-uploaded_file = st.file_uploader(
-    "Upload Your Resume/Experience (PDF or TXT) to Begin:", 
-    type=["txt", "pdf"],
-    accept_multiple_files=False
-)
-# --- END UI INPUTS ---
+# Use columns for the layout that matches your screenshot
+col1, col2 = st.columns([1, 1])
 
-# Initialize session state for the roadmap results
-if 'roadmap_result' not in st.session_state:
-    st.session_state.roadmap_result = None
+with col1:
+    st.markdown("**Your Current Role (e.g., Data Analyst)**")
+    current_role_input = st.text_input("", "Data Analyst", label_visibility="collapsed", key="current_role")
+    
+    st.markdown("**Your Target Role (e.g., AI Engineer)**")
+    target_role_input = st.text_input("", "AI Engineer", label_visibility="collapsed", key="target_role")
+    
+    # Placeholder for the button, moved to the bottom later
+    
+# --- The Resume/Experience Summary Text Area ---
+with col2:
+    st.markdown("**Paste Your Resume/Experience Summary Here (Required)**")
+    resume_text_input = st.text_area(
+        "", 
+        "5 years experience. Proficient in Python, SQL, Tableau, and team management. Led a small data team.", 
+        height=150, 
+        label_visibility="collapsed",
+        key="resume_summary"
+    )
 
-if uploaded_file:
-    # Use the filename AND the two role inputs as the unique cache ID for the whole run
-    run_id = uploaded_file.name + str(uploaded_file.size) + current_role_input + target_role_input
+# Button centered below the columns
+if st.button("Generate Personalized Career Roadmap", type="primary"):
+    
+    # Check if resume text is provided
+    if not resume_text_input.strip():
+        st.error("Please provide your Resume/Experience Summary in the text area to begin.")
+        st.stop()
+        
+    # --- The main pipeline logic ---
+    
+    # Use the combination of the text inputs as the unique cache ID for the whole run
+    run_id = current_role_input + target_role_input + resume_text_input
+    
+    # Initialize session state for the roadmap results (ensuring it's cleared if inputs change)
+    if 'roadmap_result' not in st.session_state or st.session_state.roadmap_result.get('run_id') != run_id:
+        st.session_state.roadmap_result = None 
 
-    # Check if a previous run is already in cache
-    if st.session_state.roadmap_result and st.session_state.roadmap_result.get('run_id') == run_id:
-        st.success("Roadmap loaded from cache!")
-        st.subheader("Your Personalized 6-Month Career Roadmap (Cached Result)")
-        st.markdown(st.session_state.roadmap_result['content'])
-    else:
-        # Start the pipeline when button is clicked
-        if st.button("Generate My Roadmap (Takes ~30-60 seconds)", type="primary"):
-            st.session_state.roadmap_result = None # Clear previous result
-            with st.spinner("🚀 Running Multi-Agent Pipeline..."):
-                try:
-                    # AGENT 1
-                    analysis_output = analyze_resume(uploaded_file, client)
-                    
-                    # AGENT 2 - NOW PASSING ROLE INPUTS
-                    research_output = research_gaps(
-                        analysis_output, 
-                        client, 
-                        current_role_input, 
-                        target_role_input # New unique cache ID argument
-                    )
-                    
-                    # AGENT 3 - NOW PASSING ROLE INPUTS
-                    roadmap_markdown = design_curriculum(
-                        analysis_output, 
-                        research_output, 
-                        client,
-                        current_role_input, 
-                        target_role_input # New unique cache ID argument
-                    )
-                    
-                    # Store result in session state
-                    st.session_state.roadmap_result = {
-                        'run_id': run_id,
-                        'content': roadmap_markdown
-                    }
-                    
-                    st.success("Roadmap Generation Complete!")
-                    st.subheader("Your Personalized 6-Month Career Roadmap")
-                    st.markdown(roadmap_markdown)
-                
-                except Exception as e:
-                    st.error(f"A critical error stopped the pipeline: {e}")
-                    st.session_state.roadmap_result = None
+    # Start the pipeline 
+    with st.spinner("🚀 Running Multi-Agent Pipeline..."):
+        try:
+            # AGENT 1 - Now using the text area content
+            analysis_output = analyze_resume(resume_text_input, client)
+            
+            # AGENT 2 - Passing role inputs for cache breaking
+            research_output = research_gaps(
+                analysis_output, 
+                client, 
+                current_role_input, 
+                target_role_input 
+            )
+            
+            # AGENT 3 - Passing role inputs for cache breaking
+            roadmap_markdown = design_curriculum(
+                analysis_output, 
+                research_output, 
+                client,
+                current_role_input, 
+                target_role_input 
+            )
+            
+            # Store result in session state
+            st.session_state.roadmap_result = {
+                'run_id': run_id,
+                'content': roadmap_markdown
+            }
+            
+            st.success("Roadmap Generation Complete!")
+        
+        except Exception as e:
+            st.error(f"A critical error stopped the pipeline: {e}")
+            st.session_state.roadmap_result = None
+
+# --- Display Results ---
+if st.session_state.roadmap_result and st.session_state.roadmap_result.get('content'):
+    # The output from the agents
+    st.subheader("Your Personalized 6-Month Career Roadmap")
+    st.markdown(st.session_state.roadmap_result['content'])
