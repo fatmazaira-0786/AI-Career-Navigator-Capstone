@@ -30,6 +30,13 @@ except Exception as e:
     st.error(f"Error initializing Gemini client: {e}")
     st.stop()
 
+# --- FIX: GLOBAL SESSION STATE INITIALIZATION ---
+# This ensures 'roadmap_result' exists on the very first load, preventing AttributeError
+if 'roadmap_result' not in st.session_state:
+    st.session_state.roadmap_result = None 
+# --- END FIX ---
+
+
 # Define the Google Search tool structure for grounding
 google_search_tool = {"google_search": {}}
 
@@ -239,8 +246,8 @@ if st.button("Generate Personalized Career Roadmap", type="primary"):
     # Use the combination of the text inputs as the unique cache ID for the whole run
     run_id = current_role_input + target_role_input + resume_text_input
     
-    # Initialize session state for the roadmap results (ensuring it's cleared if inputs change)
-    if 'roadmap_result' not in st.session_state or st.session_state.roadmap_result.get('run_id') != run_id:
+    # This logic handles clearing the cache result if the user changes the inputs and clicks the button again
+    if st.session_state.roadmap_result and st.session_state.roadmap_result.get('run_id') != run_id:
         st.session_state.roadmap_result = None 
 
     # Start the pipeline 
@@ -279,6 +286,7 @@ if st.button("Generate Personalized Career Roadmap", type="primary"):
             st.session_state.roadmap_result = None
 
 # --- Display Results ---
+# This now executes safely because st.session_state.roadmap_result is initialized globally.
 if st.session_state.roadmap_result and st.session_state.roadmap_result.get('content'):
     # The output from the agents
     st.subheader("Your Personalized 6-Month Career Roadmap")
