@@ -1,6 +1,3 @@
-### Initialize Session State ###
-if 'roadmap_result' not in st.session_state:
-    st.session_state['roadmap_result'] = None
 import streamlit as st
 import os
 import json
