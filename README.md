@@ -36,7 +36,6 @@ The full execution, output, and detailed documentation are available in the publ
 | :--- | :--- |
 | **Kaggle Notebook** | **https://www.kaggle.com/code/fatmazaira/ai-powered-career-navigator** |
 | **Full Source Code** | **https://github.com/fatmazaira-0786/AI-Career-Navigator-Capstone/tree/main** |
-💻 Try the Live App here:
-**https://ai-career-navigator-capstone-orqyf5nllxkizxmsw2cgb5.streamlit.app/**
+| **Live App** | **https://ai-career-navigator-capstone-orqyf5nllxkizxmsw2cgb5.streamlit.app/** |
 
 ***
