@@ -7,7 +7,6 @@ from google import genai
 try:
     from google.genai.errors import APIError
 except ImportError:
-    # Fallback for older library versions if needed
     from google.api_core.exceptions import GoogleAPICallError as APIError
 
 # --- 1. CONFIGURATION AND INITIAL SETUP ---
@@ -25,28 +24,32 @@ if not API_KEY:
 
 # Initialize the Gemini Client
 try:
-    # Initialize client outside of cached functions
+    # Initialize client globally
     client = genai.Client(api_key=API_KEY)
 except Exception as e:
     st.error(f"Error initializing Gemini client: {e}")
     st.stop()
 
-# --- FIX: GLOBAL SESSION STATE INITIALIZATION (Ensures first-load safety) ---
+# --- GLOBAL SESSION STATE INITIALIZATION ---
 if 'roadmap_result' not in st.session_state:
     st.session_state.roadmap_result = None 
-# --- END FIX ---
+# --- END GLOBAL SETUP ---
 
 
 # Define the Google Search tool structure for grounding
 google_search_tool = {"google_search": {}}
 
-# --- 2. ROBUST API CALL FUNCTION (STABILITY) ---
+# --- 2. ROBUST API CALL FUNCTION (STABILITY AND CACHE FIX) ---
 @st.cache_data(show_spinner=False)
-# FIX: Renamed 'client' to '_client' to prevent Streamlit hashing error in cache
-def safe_generate_content(_client, model_name, contents, system_instruction, max_retries=7, tools=None):
+# FIX: Removed the non-hashable '_client' argument from the cached function signature.
+# The cache key is now only based on hashable inputs (model_name, contents, etc.).
+def safe_generate_content(model_name, contents, system_instruction, max_retries=7, tools=None):
     """
-    Handles API calls with automatic retries on server errors (503, 504) and improved stability.
+    Handles API calls with automatic retries. Accesses the global 'client' object.
     """
+    # Access the global client here. This is safe because this function is only run on cache miss.
+    global client 
+    
     st.info(f"Agent running: Model '{model_name}' called. More built-in retries for stability.")
     
     # Structure the API payload correctly
@@ -61,8 +64,8 @@ def safe_generate_content(_client, model_name, contents, system_instruction, max
     
     for attempt in range(max_retries):
         try:
-            # Use the renamed client argument here
-            response = _client.models.generate_content(
+            # Use the global client object
+            response = client.models.generate_content(
                 model=payload["model"],
                 contents=payload["contents"],
                 config=payload["config"]
@@ -87,8 +90,9 @@ def safe_generate_content(_client, model_name, contents, system_instruction, max
 # --- 3. AGENT FUNCTIONS (PIPELINE) ---
 
 # --- AGENT 1: Resume Analyzer ---
-# FIX: Renamed 'client' to '_client' to prevent Streamlit hashing error
-def analyze_resume(resume_text, _client):
+# NOTE: This function is NOT cached because its result depends on the non-deterministic resume_text_input 
+# and we want it to run first to set up the pipeline.
+def analyze_resume(resume_text):
     """Extracts skills, roles, and target career from resume text."""
     st.info("Agent 1 (Resume Analyzer) is processing your resume summary...")
     
@@ -101,10 +105,9 @@ def analyze_resume(resume_text, _client):
     
     prompt = f"Analyze the following resume text and return the required JSON:\n\n---\n{resume_text}"
     
-    # Pass the client argument with underscore
+    # FIX: No need to pass 'client' here. safe_generate_content is now cached and uses the global client.
     response = safe_generate_content(
-        _client,
-        model_name="gemini-2.5-flash-preview-09-2025", # QUOTA FIX: Using Flash
+        model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
         system_instruction=system_instruction,
         tools=None
@@ -124,8 +127,7 @@ def analyze_resume(resume_text, _client):
 
 # --- AGENT 2: Market Researcher ---
 @st.cache_data(show_spinner=False)
-# FIX: Renamed 'client' to '_client' to prevent Streamlit hashing error
-def research_gaps(analysis_data, _client, current_role, target_role):
+def research_gaps(analysis_data, current_role, target_role):
     """Uses Google Search to find required skills and salary expectations, cache based on role inputs."""
     st.info("Agent 2 (Market Researcher) is finding real-time job requirements...")
     
@@ -140,10 +142,8 @@ def research_gaps(analysis_data, _client, current_role, target_role):
     
     prompt = f"Find the current market requirements for a {target}."
     
-    # Pass the client argument with underscore
+    # FIX: safe_generate_content call simplified
     response = safe_generate_content(
-        _client,
-        # REFINEMENT: Ensure consistent use of the full preview name
         model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
         system_instruction=system_instruction,
@@ -162,8 +162,7 @@ def research_gaps(analysis_data, _client, current_role, target_role):
 
 # --- AGENT 3: Curriculum Designer ---
 @st.cache_data(show_spinner=False)
-# FIX: Renamed 'client' to '_client' to prevent Streamlit hashing error
-def design_curriculum(analysis_data, research_data, _client, current_role, target_role):
+def design_curriculum(analysis_data, research_data, current_role, target_role):
     """Creates the final 6-month roadmap, cache based on role inputs."""
     st.info("Agent 3 (Curriculum Designer) is synthesizing the final 6-Month Roadmap...")
     
@@ -173,7 +172,6 @@ def design_curriculum(analysis_data, research_data, _client, current_role, targe
     target = target_role
     
     # 2. Identify Skill Gaps
-    # Only include required skills that are NOT already in current skills
     gap_skills = [
         skill for skill in research_data["required_skills"] 
         if skill not in analysis_data["current_skills"]
@@ -199,10 +197,8 @@ def design_curriculum(analysis_data, research_data, _client, current_role, targe
     Each month should have 3-4 specific, actionable learning items.
     """
     
-    # Pass the client argument with underscore
+    # FIX: safe_generate_content call simplified
     response = safe_generate_content(
-        _client,
-        # QUOTA FIX: Using Flash for efficient generation.
         model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
         system_instruction=system_instruction,
@@ -216,7 +212,6 @@ def design_curriculum(analysis_data, research_data, _client, current_role, targe
 st.title("AI-Powered Career Navigator")
 st.markdown("A Multi-Agent Gemini System for generating personalized 6-Month Career Roadmaps.")
 
-# Use columns for the layout that matches your screenshot
 col1, col2 = st.columns([1, 1])
 
 with col1:
@@ -226,7 +221,6 @@ with col1:
     st.markdown("**Your Target Role (e.g., AI Engineer)**")
     target_role_input = st.text_input("", "AI Engineer", label_visibility="collapsed", key="target_role")
     
-# --- The Resume/Experience Summary Text Area ---
 with col2:
     st.markdown("**Paste Your Resume/Experience Summary Here (Required)**")
     resume_text_input = st.text_area(
@@ -237,10 +231,11 @@ with col2:
         key="resume_summary"
     )
 
-# Button centered below the columns
 if st.button("Generate Personalized Career Roadmap", type="primary"):
     
-    # Check if resume text is provided
+    # Clear cache for all functions if a new run is initiated
+    st.cache_data.clear()
+    
     if not resume_text_input.strip():
         st.error("Please provide your Resume/Experience Summary in the text area to begin.")
         st.stop()
@@ -250,29 +245,27 @@ if st.button("Generate Personalized Career Roadmap", type="primary"):
     # Use the combination of the text inputs as the unique cache ID for the whole run
     run_id = current_role_input + target_role_input + resume_text_input
     
-    # This logic handles clearing the cache result if the user changes the inputs and clicks the button again
+    # Reset session state if inputs change
     if st.session_state.roadmap_result and st.session_state.roadmap_result.get('run_id') != run_id:
         st.session_state.roadmap_result = None 
 
     # Start the pipeline 
     with st.spinner("🚀 Running Multi-Agent Pipeline..."):
         try:
-            # AGENT 1 - Now passing the global 'client' object as '_client'
-            analysis_output = analyze_resume(resume_text_input, client)
+            # AGENT 1 - No client argument needed
+            analysis_output = analyze_resume(resume_text_input)
             
-            # AGENT 2 - Passing role inputs for cache breaking
+            # AGENT 2 - No client argument needed
             research_output = research_gaps(
                 analysis_output, 
-                client, # Passed as _client inside the function
                 current_role_input, 
                 target_role_input 
             )
             
-            # AGENT 3 - Passing role inputs for cache breaking
+            # AGENT 3 - No client argument needed
             roadmap_markdown = design_curriculum(
                 analysis_output, 
                 research_output, 
-                client, # Passed as _client inside the function
                 current_role_input, 
                 target_role_input 
             )
@@ -291,6 +284,5 @@ if st.button("Generate Personalized Career Roadmap", type="primary"):
 
 # --- Display Results ---
 if st.session_state.roadmap_result and st.session_state.roadmap_result.get('content'):
-    # The output from the agents
     st.subheader("Your Personalized 6-Month Career Roadmap")
     st.markdown(st.session_state.roadmap_result['content'])
