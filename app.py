@@ -33,26 +33,22 @@ except Exception as e:
 # --- GLOBAL SESSION STATE INITIALIZATION ---
 if 'roadmap_result' not in st.session_state:
     st.session_state.roadmap_result = None 
-# --- END GLOBAL SETUP ---
-
 
 # Define the Google Search tool structure for grounding
 google_search_tool = {"google_search": {}}
 
 # --- 2. ROBUST API CALL FUNCTION (STABILITY AND CACHE FIX) ---
 @st.cache_data(show_spinner=False)
-# FIX: Removed the non-hashable '_client' argument from the cached function signature.
-# The cache key is now only based on hashable inputs (model_name, contents, etc.).
+# Removed the non-hashable '_client' argument from the cached function signature.
 def safe_generate_content(model_name, contents, system_instruction, max_retries=7, tools=None):
     """
     Handles API calls with automatic retries. Accesses the global 'client' object.
+    The cache key is only based on hashable inputs (model_name, contents, etc.).
     """
-    # Access the global client here. This is safe because this function is only run on cache miss.
     global client 
     
     st.info(f"Agent running: Model '{model_name}' called. More built-in retries for stability.")
     
-    # Structure the API payload correctly
     payload = {
         "model": model_name,
         "contents": [{"parts": [{"text": contents}]}],
@@ -73,7 +69,7 @@ def safe_generate_content(model_name, contents, system_instruction, max_retries=
             return response
         
         except APIError as e:
-            # Check for API errors that might be server-side (503, 504) or rate limit (429)
+            # Retry mechanism for temporary server/quota errors
             if attempt < max_retries - 1:
                 st.warning(f"Attempt {attempt + 1} failed (Server Busy/Quota). Retrying in 8 seconds...")
                 time.sleep(8)
@@ -89,11 +85,13 @@ def safe_generate_content(model_name, contents, system_instruction, max_retries=
 
 # --- 3. AGENT FUNCTIONS (PIPELINE) ---
 
-# --- AGENT 1: Resume Analyzer ---
-# NOTE: This function is NOT cached because its result depends on the non-deterministic resume_text_input 
-# and we want it to run first to set up the pipeline.
+# --- AGENT 1: Resume Analyzer (NOW CACHED) ---
+@st.cache_data(show_spinner=False)
 def analyze_resume(resume_text):
-    """Extracts skills, roles, and target career from resume text."""
+    """
+    Extracts skills, roles, and target career from resume text.
+    Cached so repeat clicks on the same text don't trigger new API calls.
+    """
     st.info("Agent 1 (Resume Analyzer) is processing your resume summary...")
     
     system_instruction = (
@@ -105,7 +103,6 @@ def analyze_resume(resume_text):
     
     prompt = f"Analyze the following resume text and return the required JSON:\n\n---\n{resume_text}"
     
-    # FIX: No need to pass 'client' here. safe_generate_content is now cached and uses the global client.
     response = safe_generate_content(
         model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
@@ -114,7 +111,6 @@ def analyze_resume(resume_text):
     )
     
     try:
-        # Clean the response text by removing markdown code blocks
         json_string = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(json_string)
     except Exception:
@@ -125,10 +121,10 @@ def analyze_resume(resume_text):
             "target_career": "Senior Data Scientist"
         }
 
-# --- AGENT 2: Market Researcher ---
+# --- AGENT 2: Market Researcher (CACHED) ---
 @st.cache_data(show_spinner=False)
 def research_gaps(analysis_data, current_role, target_role):
-    """Uses Google Search to find required skills and salary expectations, cache based on role inputs."""
+    """Uses Google Search to find required skills and salary expectations."""
     st.info("Agent 2 (Market Researcher) is finding real-time job requirements...")
     
     target = target_role 
@@ -142,7 +138,6 @@ def research_gaps(analysis_data, current_role, target_role):
     
     prompt = f"Find the current market requirements for a {target}."
     
-    # FIX: safe_generate_content call simplified
     response = safe_generate_content(
         model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
@@ -160,10 +155,10 @@ def research_gaps(analysis_data, current_role, target_role):
             "salary_range": "$140,000 - $200,000"
         }
 
-# --- AGENT 3: Curriculum Designer ---
+# --- AGENT 3: Curriculum Designer (CACHED) ---
 @st.cache_data(show_spinner=False)
 def design_curriculum(analysis_data, research_data, current_role, target_role):
-    """Creates the final 6-month roadmap, cache based on role inputs."""
+    """Creates the final 6-month roadmap."""
     st.info("Agent 3 (Curriculum Designer) is synthesizing the final 6-Month Roadmap...")
     
     # 1. Prepare combined input data
@@ -197,7 +192,6 @@ def design_curriculum(analysis_data, research_data, current_role, target_role):
     Each month should have 3-4 specific, actionable learning items.
     """
     
-    # FIX: safe_generate_content call simplified
     response = safe_generate_content(
         model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
@@ -233,54 +227,57 @@ with col2:
 
 if st.button("Generate Personalized Career Roadmap", type="primary"):
     
-    # Clear cache for all functions if a new run is initiated
-    st.cache_data.clear()
-    
     if not resume_text_input.strip():
         st.error("Please provide your Resume/Experience Summary in the text area to begin.")
         st.stop()
         
-    # --- The main pipeline logic ---
-    
-    # Use the combination of the text inputs as the unique cache ID for the whole run
+    # Create a unique ID for the current run based on all key inputs
     run_id = current_role_input + target_role_input + resume_text_input
     
-    # Reset session state if inputs change
+    # Check if we need to rerun the pipeline due to changed inputs
     if st.session_state.roadmap_result and st.session_state.roadmap_result.get('run_id') != run_id:
-        st.session_state.roadmap_result = None 
-
-    # Start the pipeline 
-    with st.spinner("🚀 Running Multi-Agent Pipeline..."):
-        try:
-            # AGENT 1 - No client argument needed
-            analysis_output = analyze_resume(resume_text_input)
-            
-            # AGENT 2 - No client argument needed
-            research_output = research_gaps(
-                analysis_output, 
-                current_role_input, 
-                target_role_input 
-            )
-            
-            # AGENT 3 - No client argument needed
-            roadmap_markdown = design_curriculum(
-                analysis_output, 
-                research_output, 
-                current_role_input, 
-                target_role_input 
-            )
-            
-            # Store result in session state
-            st.session_state.roadmap_result = {
-                'run_id': run_id,
-                'content': roadmap_markdown
-            }
-            
-            st.success("Roadmap Generation Complete!")
-            
-        except Exception as e:
-            st.error(f"A critical error stopped the pipeline: {e}")
-            st.session_state.roadmap_result = None
+        # Clear the cache if inputs have changed to force a fresh run
+        st.cache_data.clear()
+        st.session_state.roadmap_result = None
+    
+    # If roadmap is already in session state, skip generation.
+    # This prevents the initial call that often triggers the rate limit.
+    if st.session_state.roadmap_result:
+        st.success("Roadmap loaded from cache!")
+    else:
+        # Start the pipeline 
+        with st.spinner("🚀 Running Multi-Agent Pipeline..."):
+            try:
+                # AGENT 1 - Now cached based on resume_text_input
+                analysis_output = analyze_resume(resume_text_input)
+                
+                # AGENT 2 - Cached based on analysis_output, roles
+                research_output = research_gaps(
+                    analysis_output, 
+                    current_role_input, 
+                    target_role_input 
+                )
+                
+                # AGENT 3 - Cached based on all prior outputs
+                roadmap_markdown = design_curriculum(
+                    analysis_output, 
+                    research_output, 
+                    current_role_input, 
+                    target_role_input 
+                )
+                
+                # Store result in session state
+                st.session_state.roadmap_result = {
+                    'run_id': run_id,
+                    'content': roadmap_markdown
+                }
+                
+                st.success("Roadmap Generation Complete!")
+                
+            except Exception as e:
+                # Handle API/parsing errors
+                st.error(f"A critical error stopped the pipeline: {e}")
+                st.session_state.roadmap_result = None
 
 # --- Display Results ---
 if st.session_state.roadmap_result and st.session_state.roadmap_result.get('content'):
