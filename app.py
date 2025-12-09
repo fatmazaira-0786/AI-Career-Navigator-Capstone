@@ -7,6 +7,7 @@ from google import genai
 try:
     from google.genai.errors import APIError
 except ImportError:
+    # Fallback for older library versions if needed
     from google.api_core.exceptions import GoogleAPICallError as APIError
 
 # --- 1. CONFIGURATION AND INITIAL SETUP ---
@@ -30,8 +31,7 @@ except Exception as e:
     st.error(f"Error initializing Gemini client: {e}")
     st.stop()
 
-# --- FIX: GLOBAL SESSION STATE INITIALIZATION ---
-# This ensures 'roadmap_result' exists on the very first load, preventing AttributeError
+# --- FIX: GLOBAL SESSION STATE INITIALIZATION (Ensures first-load safety) ---
 if 'roadmap_result' not in st.session_state:
     st.session_state.roadmap_result = None 
 # --- END FIX ---
@@ -42,13 +42,12 @@ google_search_tool = {"google_search": {}}
 
 # --- 2. ROBUST API CALL FUNCTION (STABILITY) ---
 @st.cache_data(show_spinner=False)
-# FIX: Renamed 'client' to '_client' to prevent Streamlit hashing error
+# FIX: Renamed 'client' to '_client' to prevent Streamlit hashing error in cache
 def safe_generate_content(_client, model_name, contents, system_instruction, max_retries=7, tools=None):
     """
-    Handles API calls with automatic retries on server errors (503, 504).
-    Increased retries (7) and wait time (8s) for stability.
+    Handles API calls with automatic retries on server errors (503, 504) and improved stability.
     """
-    st.info(f"Agent running... This process now has more built-in retries.")
+    st.info(f"Agent running: Model '{model_name}' called. More built-in retries for stability.")
     
     # Structure the API payload correctly
     payload = {
@@ -71,11 +70,12 @@ def safe_generate_content(_client, model_name, contents, system_instruction, max
             return response
         
         except APIError as e:
-            st.warning(f"Attempt {attempt + 1} failed (Server Busy/Timeout). Retrying in 8 seconds...")
+            # Check for API errors that might be server-side (503, 504) or rate limit (429)
             if attempt < max_retries - 1:
+                st.warning(f"Attempt {attempt + 1} failed (Server Busy/Quota). Retrying in 8 seconds...")
                 time.sleep(8)
             else:
-                st.error("All retries failed. Please try again later.")
+                st.error(f"All retries failed after APIError: {e}. Please try again later.")
                 raise
         
         except Exception as e:
@@ -104,13 +104,14 @@ def analyze_resume(resume_text, _client):
     # Pass the client argument with underscore
     response = safe_generate_content(
         _client,
-        model_name="gemini-2.5-flash",
+        model_name="gemini-2.5-flash-preview-09-2025", # QUOTA FIX: Using Flash
         contents=prompt,
         system_instruction=system_instruction,
         tools=None
     )
     
     try:
+        # Clean the response text by removing markdown code blocks
         json_string = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(json_string)
     except Exception:
@@ -142,7 +143,8 @@ def research_gaps(analysis_data, _client, current_role, target_role):
     # Pass the client argument with underscore
     response = safe_generate_content(
         _client,
-        model_name="gemini-2.5-flash", # Faster model for tool use stability
+        # REFINEMENT: Ensure consistent use of the full preview name
+        model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
         system_instruction=system_instruction,
         tools=[google_search_tool]
@@ -171,6 +173,7 @@ def design_curriculum(analysis_data, research_data, _client, current_role, targe
     target = target_role
     
     # 2. Identify Skill Gaps
+    # Only include required skills that are NOT already in current skills
     gap_skills = [
         skill for skill in research_data["required_skills"] 
         if skill not in analysis_data["current_skills"]
@@ -199,7 +202,8 @@ def design_curriculum(analysis_data, research_data, _client, current_role, targe
     # Pass the client argument with underscore
     response = safe_generate_content(
         _client,
-        model_name="gemini-2.5-pro", # Use Pro for high-quality, long-form output
+        # QUOTA FIX: Using Flash for efficient generation.
+        model_name="gemini-2.5-flash-preview-09-2025", 
         contents=prompt,
         system_instruction=system_instruction,
         tools=None
@@ -280,13 +284,12 @@ if st.button("Generate Personalized Career Roadmap", type="primary"):
             }
             
             st.success("Roadmap Generation Complete!")
-        
+            
         except Exception as e:
             st.error(f"A critical error stopped the pipeline: {e}")
             st.session_state.roadmap_result = None
 
 # --- Display Results ---
-# This now executes safely because st.session_state.roadmap_result is initialized globally.
 if st.session_state.roadmap_result and st.session_state.roadmap_result.get('content'):
     # The output from the agents
     st.subheader("Your Personalized 6-Month Career Roadmap")
